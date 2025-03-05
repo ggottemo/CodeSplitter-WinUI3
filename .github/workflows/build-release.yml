@@ -89,15 +89,15 @@ jobs:
       
     - name: Build solution
       run: |
-        Write-Host "Building solution: ${{ env.Solution_Name }}"
-        msbuild /p:Configuration=${{ env.Configuration }} `
-                /p:Platform="${{ env.Platform }}" `
-                /p:AppxPackageDir="AppPackages\" `
-                /p:AppxBundle=Always `
-                /p:UapAppxPackageBuildMode=StoreUpload `
-                /p:AppxBundlePlatforms="${{ env.Platform }}" `
-                /p:GenerateAppxPackageOnBuild=true `
-                ${{ env.Solution_Name }}
+          msbuild /p:Configuration=${{ env.Configuration }} `
+            /p:Platform="${{ env.Platform }}" `
+            /p:AppxPackageDir="AppPackages\" `
+            /p:AppxBundle=Always `
+            /p:UapAppxPackageBuildMode=StoreUpload `
+            /p:AppxBundlePlatforms="${{ env.Platform }}" `
+            /p:GenerateAppxPackageOnBuild=true `
+            /p:SelfContained=true `
+            ${{ env.Solution_Name }}
                 
         if ($LASTEXITCODE -ne 0) {
           Write-Error "Build failed with exit code $LASTEXITCODE"
