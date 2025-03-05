@@ -11,7 +11,6 @@ jobs:
     
     env:
       Solution_Name: CodeSplitter.sln
-      Project_Directory: CodeSplitter
       Configuration: Release
       Platform: x64
       
@@ -71,7 +70,7 @@ jobs:
           $tag = $tag.Substring(1)
         }
         
-        $manifestPath = "${{ env.Project_Directory }}\Package.appxmanifest"
+        $manifestPath = "Package.appxmanifest"
         Write-Host "Setting version to $tag.0 in $manifestPath"
         
         if (-not (Test-Path $manifestPath)) {
@@ -105,7 +104,7 @@ jobs:
           }
           
           # Verify that MSIX package was created
-          $msixCount = (Get-ChildItem -Path "${{ env.Project_Directory }}\AppPackages\" -Filter "*.msix*" -Recurse).Count
+          $msixCount = (Get-ChildItem -Path "AppPackages\" -Filter "*.msix*" -Recurse).Count
           Write-Host "Found $msixCount MSIX package(s) in output directory"
           if ($msixCount -eq 0) {
             Write-Error "No MSIX packages were generated during build"
@@ -143,11 +142,11 @@ jobs:
         
         # Set project properties
         advancedinstaller.com /edit installer.aip /SetProperty ProductName="Code File Splitter"
-        advancedinstaller.com /edit installer.aip /SetProperty Manufacturer="Your Company"
+        advancedinstaller.com /edit installer.aip /SetProperty Manufacturer="GG"
         advancedinstaller.com /edit installer.aip /SetProperty Version="$version"
         
         # Find the MSIX package in the build output
-        $msixPath = Get-ChildItem -Path "${{ env.Project_Directory }}\AppPackages\" -Filter "*.msix" -Recurse | Select-Object -First 1 -ExpandProperty FullName
+        $msixPath = Get-ChildItem -Path "AppPackages\" -Filter "*.msix" -Recurse | Select-Object -First 1 -ExpandProperty FullName
         if (-not $msixPath) {
           Write-Error "No MSIX package found in build output"
           exit 1
