@@ -121,6 +121,8 @@ jobs:
           Write-Error "Failed to install Advanced Installer"
           exit 1
         }
+
+        refreshenv
         
         # Get version from tag or use default
         $version = "${{ github.ref_name }}"
