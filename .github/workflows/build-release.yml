@@ -99,18 +99,18 @@ jobs:
             /p:SelfContained=true `
             ${{ env.Solution_Name }}
                 
-        if ($LASTEXITCODE -ne 0) {
-          Write-Error "Build failed with exit code $LASTEXITCODE"
-          exit 1
-        }
-        
-        # Verify that MSIX package was created
-        $msixCount = (Get-ChildItem -Path "${{ env.Project_Directory }}\AppPackages\" -Filter "*.msix*" -Recurse).Count
-        Write-Host "Found $msixCount MSIX package(s) in output directory"
-        if ($msixCount -eq 0) {
-          Write-Error "No MSIX packages were generated during build"
-          exit 1
-        }
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "Build failed with exit code $LASTEXITCODE"
+            exit 1
+          }
+          
+          # Verify that MSIX package was created
+          $msixCount = (Get-ChildItem -Path "${{ env.Project_Directory }}\AppPackages\" -Filter "*.msix*" -Recurse).Count
+          Write-Host "Found $msixCount MSIX package(s) in output directory"
+          if ($msixCount -eq 0) {
+            Write-Error "No MSIX packages were generated during build"
+            exit 1
+          }
       shell: pwsh
       
     - name: Create MSI installer with Advanced Installer
