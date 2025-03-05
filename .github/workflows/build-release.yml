@@ -123,6 +123,7 @@ jobs:
         }
 
         Import-Module $env:ChocolateyInstall\helpers\chocolateyProfile.psm1
+        refreshenv
         
         # Get version from tag or use default
         $version = "${{ github.ref_name }}"
