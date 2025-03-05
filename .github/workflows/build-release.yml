@@ -10,8 +10,8 @@ jobs:
     runs-on: windows-latest
     
     env:
-      Solution_Name: CodeFileSplitter.sln
-      Project_Directory: CodeFileSplitter
+      Solution_Name: CodeSplitter.sln
+      Project_Directory: CodeSplitter
       Configuration: Release
       Platform: x64
       
