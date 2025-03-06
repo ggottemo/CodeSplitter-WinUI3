@@ -118,17 +118,19 @@ jobs:
         Write-Host "Installing Advanced Installer via Chocolatey"
         choco install advanced-installer -y
         
-        # Find the Advanced Installer executable - the installation location is shown in the logs
-        $advinstPath = "C:\Program Files (x86)\Caphyon\Advanced Installer 22.5\bin\x86\advinst.exe"
+        # Refresh environment variables
+        refreshenv
+        
+        # Find the correct executable (AdvancedInstaller.com, not advinst.exe)
+        $advinstPath = "C:\Program Files (x86)\Caphyon\Advanced Installer 22.5\bin\x86\AdvancedInstaller.com"
         
         Write-Host "Checking for Advanced Installer at: $advinstPath"
         if (-not (Test-Path $advinstPath)) {
-          # Search for the executable
           Write-Host "Searching for Advanced Installer executable..."
-          $advinstPath = Get-ChildItem -Path "C:\Program Files (x86)" -Recurse -Filter "advinst.exe" | 
-                         Select-Object -First 1 -ExpandProperty FullName
-          
-          if (-not $advinstPath) {
+          $possiblePaths = Get-ChildItem -Path "C:\Program Files (x86)" -Recurse -Filter "AdvancedInstaller.com" -ErrorAction SilentlyContinue
+          if ($possiblePaths) {
+            $advinstPath = $possiblePaths[0].FullName
+          } else {
             Write-Error "Could not find Advanced Installer executable"
             exit 1
           }
@@ -141,35 +143,49 @@ jobs:
         if (-not $version -or $version -eq '') { $version = "1.0.0" }
         if ($version.StartsWith('v')) { $version = $version.Substring(1) }
         
-        Write-Host "Creating MSI for version $version"
-        
         # Find the MSIX package
-        $msixPath = Get-ChildItem -Path "AppPackages\" -Filter "*.msix" -Recurse | 
-                    Select-Object -First 1 -ExpandProperty FullName
-        
+        $msixPath = Get-ChildItem -Path "AppPackages\" -Filter "*.msix" -Recurse | Select-Object -First 1 -ExpandProperty FullName
         if (-not $msixPath) {
           Write-Error "No MSIX package found in build output"
           exit 1
         }
-        Write-Host "Found MSIX package at: $msixPath"
         
-        # Create MSI directly from MSIX using simple command
-        $msiPath = ".\CodeFileSplitter-$version.msi"
-        Write-Host "Creating MSI at: $msiPath"
+        # Create a new Advanced Installer project of type msix_to_msi
+        Write-Host "Creating Advanced Installer project"
+        & $advinstPath /newproject "installer.aip" -packagetype "msix_to_msi"
         
-        & $advinstPath /msixToMsi "$msixPath" "$msiPath"
+        # Set project properties
+        & $advinstPath /edit "installer.aip" /SetProperty ProductName="Code File Splitter"
+        & $advinstPath /edit "installer.aip" /SetProperty Manufacturer="Your Company"
+        & $advinstPath /edit "installer.aip" /SetProperty Version="$version"
         
-        if ($LASTEXITCODE -ne 0) {
-          Write-Error "Failed to convert MSIX to MSI"
-          exit 1
+        # Add MSIX package to project
+        Write-Host "Adding MSIX package: $msixPath"
+        & $advinstPath /edit "installer.aip" /AddMsix "$msixPath"
+        
+        # Build the project
+        Write-Host "Building MSI"
+        & $advinstPath /build "installer.aip"
+        
+        # Copy the resulting MSI to expected location
+        $msiPath = "MSI\CodeFileSplitter.msi"
+        if (Test-Path $msiPath) {
+          $targetPath = "CodeFileSplitter-$version.msi"
+          Copy-Item $msiPath $targetPath
+          Write-Host "MSI created successfully at: $targetPath"
+        } else {
+          Write-Host "Looking for MSI in output directory..."
+          $msiFiles = Get-ChildItem -Path "MSI\" -Filter "*.msi" -Recurse
+          if ($msiFiles) {
+            $sourcePath = $msiFiles[0].FullName
+            $targetPath = "CodeFileSplitter-$version.msi"
+            Copy-Item $sourcePath $targetPath
+            Write-Host "MSI created and copied to: $targetPath"
+          } else {
+            Write-Error "No MSI files found in output directory"
+            exit 1
+          }
         }
-        
-        if (-not (Test-Path $msiPath)) {
-          Write-Error "MSI file wasn't created at expected location"
-          exit 1
-        }
-        
-        Write-Host "MSI installer created successfully: $msiPath"
       shell: pwsh
       
     - name: Create Release
