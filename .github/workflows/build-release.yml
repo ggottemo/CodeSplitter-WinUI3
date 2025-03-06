@@ -181,7 +181,7 @@ jobs:
         Write-Host "Adding files from extracted MSIX to the project"
         if (Test-Path $extractDir) {
           # Add all extracted files to the project
-          & $advinstPath /edit "installer.aip" /AddFolder "$extractDir"
+          & $advinstPath /edit "installer.aip" /AddFolder "[APPDIR]" "$extractDir"
           
           # Get AppxManifest.xml to extract more information if needed
           $manifestPath = Join-Path -Path $extractDir -ChildPath "AppxManifest.xml"
