@@ -150,27 +150,54 @@ jobs:
           exit 1
         }
         
+        # Extract the MSIX package
+        $extractDir = "MSIXExtracted"
+        New-Item -ItemType Directory -Path $extractDir -Force
+        
+        # Use Expand-Archive if the MSIX is actually a ZIP (which it should be internally)
+        try {
+          Write-Host "Extracting MSIX package to $extractDir"
+          Expand-Archive -Path $msixPath -DestinationPath $extractDir -Force
+        } catch {
+          Write-Host "Standard extraction failed, trying alternative method..."
+          # If that fails, try using 7zip which comes with GitHub Actions runners
+          & 7z x -o"$extractDir" "$msixPath"
+        }
+        
         # Create output directory
         $msiDir = "MSI"
         New-Item -ItemType Directory -Path $msiDir -Force
         
-        # Create a new Advanced Installer project (simple way first)
-        # Just create a basic MSI project since we couldn't find packagetype parameter
+        # Create a new simple Advanced Installer project
         Write-Host "Creating Advanced Installer project"
         & $advinstPath /newproject "installer.aip"
-        
-        # List all available commands to better understand what we have to work with
-        Write-Host "Checking available commands for importing MSIX:"
-        & $advinstPath /help | Select-String -Pattern "import"
-        
-        # Try using ImportMsi command - it might work with MSIX too
-        Write-Host "Attempting to import MSIX package: $msixPath"
-        & $advinstPath /edit "installer.aip" /ImportRepack "$msixPath"
         
         # Set product properties
         & $advinstPath /edit "installer.aip" /SetProperty ProductName="Code File Splitter"
         & $advinstPath /edit "installer.aip" /SetProperty Manufacturer="Your Company"
         & $advinstPath /edit "installer.aip" /SetProperty Version="$version"
+        
+        # Add the extracted files to the project
+        Write-Host "Adding files from extracted MSIX to the project"
+        if (Test-Path $extractDir) {
+          # Add all extracted files to the project
+          & $advinstPath /edit "installer.aip" /AddFolder "$extractDir"
+          
+          # Get AppxManifest.xml to extract more information if needed
+          $manifestPath = Join-Path -Path $extractDir -ChildPath "AppxManifest.xml"
+          if (Test-Path $manifestPath) {
+            Write-Host "Found AppxManifest.xml, extracting info"
+            $manifest = [xml](Get-Content $manifestPath)
+            $appId = $manifest.Package.Identity.Name
+            Write-Host "App ID: $appId"
+            
+            # Set more properties based on the manifest if needed
+            & $advinstPath /edit "installer.aip" /SetProperty ProductName="$appId"
+          }
+        } else {
+          Write-Error "Failed to extract MSIX package"
+          exit 1
+        }
         
         # Set output directory
         $fullMsiDir = Join-Path -Path (Get-Location) -ChildPath $msiDir
