@@ -173,13 +173,13 @@ jobs:
           ${{ runner.os }}-nuget-
 
     - name: Upload MSIX package
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: MSIX Package
         path: AppPackages/
         
     - name: Upload Certificate
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: Certificate
         path: AppCertificate.cer
