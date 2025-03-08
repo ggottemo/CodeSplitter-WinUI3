@@ -7,12 +7,17 @@ on:
 
 jobs:
   build:
+    strategy:
+      matrix:
+        configuration: [Release]
+        platform: [x64]  # You can add x86 if needed
+
     runs-on: windows-latest
     
     env:
       Solution_Name: CodeSplitter.sln
-      Configuration: Release
-      Platform: x64
+      Configuration: ${{ matrix.configuration }}
+      Platform: ${{ matrix.platform }}
       
     steps:
     - name: Checkout code
@@ -86,31 +91,77 @@ jobs:
       shell: pwsh
       if: startsWith(github.ref, 'refs/tags/v')
       
-    - name: Build solution
-      if: steps.build-cache.outputs.cache-hit != 'true' || startsWith(github.ref, 'refs/tags/v')
+    # Generate a test certificate if no certificate is provided
+    - name: Create or use certificate
       run: |
-          msbuild /p:Configuration=${{ env.Configuration }} `
+        # Check if the BASE64_ENCODED_PFX secret exists
+        if ("${{ secrets.BASE64_ENCODED_PFX }}" -ne "") {
+          Write-Host "Using provided certificate"
+          $pfx_cert_byte = [System.Convert]::FromBase64String("${{ secrets.BASE64_ENCODED_PFX }}")
+          $certificatePath = "GitHubActionsWorkflow.pfx"
+          [IO.File]::WriteAllBytes("$certificatePath", $pfx_cert_byte)
+        } else {
+          Write-Host "Creating test certificate"
+          # Create a new self-signed certificate
+          $cert = New-SelfSignedCertificate -Type Custom -Subject "CN=YourCompanyName" -KeyUsage DigitalSignature -FriendlyName "Your App Certificate" -CertStoreLocation "Cert:\CurrentUser\My" -TextExtension @("2.5.29.37={text}1.3.6.1.5.5.7.3.3", "2.5.29.19={text}")
+          
+          # Export the certificate with a password
+          $password = ConvertTo-SecureString -String "YourPassword" -Force -AsPlainText
+          $certPath = "GitHubActionsWorkflow.pfx"
+          Export-PfxCertificate -Cert $cert -FilePath $certPath -Password $password
+          
+          # Also export the public certificate that users will need to install
+          Export-Certificate -Cert $cert -FilePath "AppCertificate.cer" -Type CERT
+          
+          # Set environment variable for build step
+          echo "CERT_PASSWORD=YourPassword" >> $env:GITHUB_ENV
+        }
+      shell: pwsh
+      
+    - name: Build solution
+      run: |
+        if (Test-Path env:CERT_PASSWORD) {
+          # If using generated cert with password
+          msbuild ${{ env.Solution_Name }} `
+            /p:Configuration=${{ env.Configuration }} `
             /p:Platform="${{ env.Platform }}" `
             /p:AppxPackageDir="AppPackages\" `
             /p:AppxBundle=Always `
-            /p:UapAppxPackageBuildMode=StoreUpload `
+            /p:UapAppxPackageBuildMode=StoreAndSideload `
             /p:AppxBundlePlatforms="${{ env.Platform }}" `
-            /p:GenerateAppxPackageOnBuild=true `
-            /p:SelfContained=true `
-            ${{ env.Solution_Name }}
+            /p:PackageCertificateKeyFile=GitHubActionsWorkflow.pfx `
+            /p:PackageCertificatePassword=$env:CERT_PASSWORD `
+            /p:GenerateAppxPackageOnBuild=true
+        } else {
+          # If using provided cert without password
+          msbuild ${{ env.Solution_Name }} `
+            /p:Configuration=${{ env.Configuration }} `
+            /p:Platform="${{ env.Platform }}" `
+            /p:AppxPackageDir="AppPackages\" `
+            /p:AppxBundle=Always `
+            /p:UapAppxPackageBuildMode=StoreAndSideload `
+            /p:AppxBundlePlatforms="${{ env.Platform }}" `
+            /p:PackageCertificateKeyFile=GitHubActionsWorkflow.pfx `
+            /p:GenerateAppxPackageOnBuild=true
+        }
                 
-          if ($LASTEXITCODE -ne 0) {
-            Write-Error "Build failed with exit code $LASTEXITCODE"
-            exit 1
-          }
+        if ($LASTEXITCODE -ne 0) {
+          Write-Error "Build failed with exit code $LASTEXITCODE"
+          exit 1
+        }
           
-          # Verify that MSIX package was created
-          $msixCount = (Get-ChildItem -Path "AppPackages\" -Filter "*.msix*" -Recurse).Count
-          Write-Host "Found $msixCount MSIX package(s) in output directory"
-          if ($msixCount -eq 0) {
-            Write-Error "No MSIX packages were generated during build"
-            exit 1
-          }
+        # Verify that MSIX package was created
+        $msixCount = (Get-ChildItem -Path "AppPackages\" -Filter "*.msix*" -Recurse).Count
+        Write-Host "Found $msixCount MSIX package(s) in output directory"
+        if ($msixCount -eq 0) {
+          Write-Error "No MSIX packages were generated during build"
+          exit 1
+        }
+      shell: pwsh
+
+    # Remove the pfx
+    - name: Remove the pfx
+      run: Remove-Item -path GitHubActionsWorkflow.pfx
       shell: pwsh
 
     - name: Cache NuGet packages
@@ -121,175 +172,189 @@ jobs:
         restore-keys: |
           ${{ runner.os }}-nuget-
 
-    - name: Cache build output
-      uses: actions/cache@v3
-      id: build-cache
+    - name: Upload MSIX package
+      uses: actions/upload-artifact@v3
       with:
-        path: |
-          AppPackages/
-          **/bin/
-          **/obj/
-        key: ${{ runner.os }}-build-${{ hashFiles('**/*.cs', '**/*.xaml', '**/*.csproj', '**/*.sln') }}-${{ github.run_id }}
-        restore-keys: |
-          ${{ runner.os }}-build-${{ hashFiles('**/*.cs', '**/*.xaml', '**/*.csproj', '**/*.sln') }}-
+        name: MSIX Package
+        path: AppPackages/
+        
+    - name: Upload Certificate
+      uses: actions/upload-artifact@v3
+      with:
+        name: Certificate
+        path: AppCertificate.cer
+      if: hashFiles('AppCertificate.cer') != ''
       
-    - name: Create MSI installer with Advanced Installer
+    # Install WiX Toolset
+    - name: Install WiX Toolset
       run: |
-        # Install Advanced Installer CLI
-        Write-Host "Installing Advanced Installer via Chocolatey"
-        choco install advanced-installer -y
-        
-        # Refresh environment variables
+        Write-Host "Installing WiX Toolset..."
+        choco install wixtoolset -y
         refreshenv
-        
-        # Find the correct executable
-        $advinstPath = "C:\Program Files (x86)\Caphyon\Advanced Installer 22.5\bin\x86\AdvancedInstaller.com"
-        
-        Write-Host "Checking for Advanced Installer at: $advinstPath"
-        if (-not (Test-Path $advinstPath)) {
-          Write-Host "Searching for Advanced Installer executable..."
-          $possiblePaths = Get-ChildItem -Path "C:\Program Files (x86)" -Recurse -Filter "AdvancedInstaller.com" -ErrorAction SilentlyContinue
-          if ($possiblePaths) {
-            $advinstPath = $possiblePaths[0].FullName
-          } else {
-            Write-Error "Could not find Advanced Installer executable"
-            exit 1
-          }
-        }
-        
-        Write-Host "Found Advanced Installer at: $advinstPath"
-        
+      shell: pwsh
+      
+    # Create MSI installer with WiX Toolset
+    - name: Create MSI installer
+      run: |
         # Get version from tag
         $version = "${{ github.ref_name }}"
         if (-not $version -or $version -eq '') { $version = "1.0.0" }
         if ($version.StartsWith('v')) { $version = $version.Substring(1) }
         
-        # Find the MSIX package
-        $msixPath = Get-ChildItem -Path "AppPackages\" -Filter "*.msix" -Recurse | Select-Object -First 1 -ExpandProperty FullName
-        if (-not $msixPath) {
-          Write-Error "No MSIX package found in build output"
+        # Create folder for installer files
+        $installerDir = "InstallerFiles"
+        New-Item -ItemType Directory -Path $installerDir -Force
+        
+        # Get main executable path
+        $exePath = Get-ChildItem -Path "${{ env.Platform }}\${{ env.Configuration }}" -Filter "*.exe" | Select-Object -First 1 -ExpandProperty FullName
+        if (-not $exePath) {
+          Write-Error "Could not find the main executable"
           exit 1
         }
+        $exeName = [System.IO.Path]::GetFileName($exePath)
+        Write-Host "Found main executable: $exeName"
         
-        # Extract the MSIX package
-        $extractDir = "MSIXExtracted"
-        New-Item -ItemType Directory -Path $extractDir -Force
-        
-        # Use Expand-Archive if the MSIX is actually a ZIP (which it should be internally)
-        try {
-          Write-Host "Extracting MSIX package to $extractDir"
-          Expand-Archive -Path $msixPath -DestinationPath $extractDir -Force
-        } catch {
-          Write-Host "Standard extraction failed, trying alternative method..."
-          # If that fails, try using 7zip which comes with GitHub Actions runners
-          & 7z x -o"$extractDir" "$msixPath"
-        }
-        
-        # Create output directory
-        $msiDir = "MSI"
-        New-Item -ItemType Directory -Path $msiDir -Force
-        
-        # Create a new simple Advanced Installer project
-        Write-Host "Creating Advanced Installer project"
-        & $advinstPath /newproject "installer.aip"
-        
-        # Set product properties
-        & $advinstPath /edit "installer.aip" /SetProperty ProductName="Code File Splitter"
-        & $advinstPath /edit "installer.aip" /SetProperty Manufacturer="Your Company"
-        & $advinstPath /edit "installer.aip" /SetProperty Version="$version"
-        
-        # Add the extracted files to the project
-        Write-Host "Adding files from extracted MSIX to the project"
-        if (Test-Path $extractDir) {
-          # Add all extracted files to the project
-          # Add files individually with correct syntax
-        Write-Host "Adding files individually to the project"
-        $exeFiles = Get-ChildItem -Path $extractDir -Filter "*.exe" -Recurse
-        foreach ($file in $exeFiles) {
-          Write-Host "Adding executable: $($file.FullName)"
-          & $advinstPath /edit "installer.aip" /AddFile "APPDIR" "$($file.FullName)"
-        }
-        
-        # Add DLL files
-        $dllFiles = Get-ChildItem -Path $extractDir -Filter "*.dll" -Recurse
-        foreach ($file in $dllFiles) {
-          Write-Host "Adding DLL: $($file.FullName)"
-          & $advinstPath /edit "installer.aip" /AddFile "APPDIR" "$($file.FullName)"
-        }
-        
-        # Create a shortcut to the main executable
-        $mainExeFile = $exeFiles | Where-Object { $_.Name -eq "CodeSplitter.exe" } | Select-Object -First 1
-        if ($mainExeFile) {
-          Write-Host "Creating shortcut to: $($mainExeFile.Name)"
-          & $advinstPath /edit "installer.aip" /NewShortcut -name "Code File Splitter" -target "APPDIR\CodeSplitter.exe" -dir "ProgramMenuFolder"
-        }
-          
-          # Get AppxManifest.xml to extract more information if needed
-          $manifestPath = Join-Path -Path $extractDir -ChildPath "AppxManifest.xml"
-          if (Test-Path $manifestPath) {
-            Write-Host "Found AppxManifest.xml, extracting info"
-            $manifest = [xml](Get-Content $manifestPath)
-            $appId = $manifest.Package.Identity.Name
-            Write-Host "App ID: $appId"
+        # Create WiX source file
+        $wxsContent = @"
+        <?xml version="1.0" encoding="UTF-8"?>
+        <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+          <Product Id="*" 
+                   Name="Code File Splitter" 
+                   Language="1033" 
+                   Version="$version" 
+                   Manufacturer="Your Company" 
+                   UpgradeCode="PUT-GUID-HERE">
             
-            # Set more properties based on the manifest if needed
-            & $advinstPath /edit "installer.aip" /SetProperty ProductName="$appId"
-          }
-        } else {
-          Write-Error "Failed to extract MSIX package"
-          exit 1
+            <Package InstallerVersion="200" Compressed="yes" InstallScope="perMachine" />
+            
+            <MajorUpgrade DowngradeErrorMessage="A newer version of Code File Splitter is already installed." />
+            <MediaTemplate EmbedCab="yes" />
+            
+            <Feature Id="ProductFeature" Title="Code File Splitter" Level="1">
+              <ComponentGroupRef Id="ProductComponents" />
+              <ComponentRef Id="ApplicationShortcut" />
+            </Feature>
+            
+            <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
+            <UIRef Id="WixUI_InstallDir" />
+            <WixVariable Id="WixUILicenseRtf" Value="license.rtf" />
+            
+            <Directory Id="TARGETDIR" Name="SourceDir">
+              <Directory Id="ProgramFilesFolder">
+                <Directory Id="INSTALLFOLDER" Name="CodeFileSplitter">
+                  <!-- Components will be added here -->
+                </Directory>
+              </Directory>
+              <Directory Id="ProgramMenuFolder">
+                <Directory Id="ApplicationProgramsFolder" Name="Code File Splitter"/>
+              </Directory>
+            </Directory>
+            
+            <ComponentGroup Id="ProductComponents" Directory="INSTALLFOLDER">
+              <!-- Components will be added here dynamically -->
+            </ComponentGroup>
+            
+            <DirectoryRef Id="ApplicationProgramsFolder">
+              <Component Id="ApplicationShortcut" Guid="*">
+                <Shortcut Id="ApplicationStartMenuShortcut" 
+                          Name="Code File Splitter" 
+                          Description="Split code files by class or function"
+                          Target="[INSTALLFOLDER]$exeName"
+                          WorkingDirectory="INSTALLFOLDER"/>
+                <RemoveFolder Id="CleanUpShortCut" Directory="ApplicationProgramsFolder" On="uninstall"/>
+                <RegistryValue Root="HKCU" Key="Software\CodeFileSplitter" Name="installed" Type="integer" Value="1" KeyPath="yes"/>
+              </Component>
+            </DirectoryRef>
+          </Product>
+        </Wix>
+        "@
+                
+                # Create a temporary license file
+                $licenseContent = @"
+        {\rtf1\ansi\ansicpg1252\deff0\nouicompat\deflang1033{\fonttbl{\f0\fnil\fcharset0 Calibri;}}
+        {\*\generator Riched20 10.0.19041}\viewkind4\uc1 
+        \pard\sa200\sl276\slmult1\f0\fs22\lang9 Sample License for Code File Splitter\par
+        \par
+        This is a placeholder license. Replace with your actual license text.\par
         }
-        
-        # Set output directory
-        $fullMsiDir = Join-Path -Path (Get-Location) -ChildPath $msiDir
-        & $advinstPath /edit "installer.aip" /SetOutputLocation -buildname "DefaultBuild" -path "$fullMsiDir"
-        
-        # Build the project
-        Write-Host "Building MSI"
-        & $advinstPath /build "installer.aip"
-        
-        # Look for MSI files in multiple locations
-        $targetPath = "CodeFileSplitter-$version.msi"
-        $msiFound = $false
-        
-        # List all files in current directory and subdirectories to debug
-        Write-Host "Files in workspace:"
-        Get-ChildItem -Path "." -Recurse -Include "*.msi", "*.exe", "*.aip" | Format-Table FullName
-        
-        # Check in specified MSI directory first
-        if (Test-Path $msiDir) {
-          Write-Host "Looking for MSI in $msiDir directory..."
-          $msiFiles = Get-ChildItem -Path $msiDir -Filter "*.msi" -ErrorAction SilentlyContinue
-          if ($msiFiles) {
-            $sourcePath = $msiFiles[0].FullName
-            Copy-Item $sourcePath $targetPath
-            Write-Host "MSI found and copied to: $targetPath"
-            $msiFound = $true
-          }
-        }
-        
-        # If not found, search in current directory and subdirectories
-        if (-not $msiFound) {
-          Write-Host "Looking for MSI files in current directory and subdirectories..."
-          $msiFiles = Get-ChildItem -Path "." -Filter "*.msi" -Recurse -ErrorAction SilentlyContinue
-          if ($msiFiles) {
-            $sourcePath = $msiFiles[0].FullName
-            Copy-Item $sourcePath $targetPath -Force
-            Write-Host "MSI found and copied to: $targetPath"
-            $msiFound = $true
-          } else {
-            Write-Error "No MSI files found in output directories"
-            exit 1
-          }
-        }
+        "@
+                
+                # Save the WiX source file and license
+                Set-Content -Path "installer.wxs" -Value $wxsContent
+                Set-Content -Path "license.rtf" -Value $licenseContent
+                
+                # Gather files for the installer
+                Write-Host "Gathering build output files..."
+                
+                # Get binaries from the build output
+                $binDir = "${{ env.Platform }}\${{ env.Configuration }}"
+                if (Test-Path $binDir) {
+                  # Get all files from bin directory
+                  $files = Get-ChildItem -Path $binDir -Recurse -File | Where-Object { -not $_.FullName.Contains("AppX") }
+                  
+                  # Create component entries in WXS file
+                  $componentXml = ""
+                  foreach ($file in $files) {
+                    $fileName = [System.IO.Path]::GetFileName($file.FullName)
+                    $fileId = $fileName.Replace(".", "_").Replace(" ", "_").Replace("-", "_")
+                    $componentXml += "<Component Id='Component_$fileId' Guid='*'>`n"
+                    $componentXml += "  <File Id='File_$fileId' Source='$($file.FullName)' KeyPath='yes'/>`n"
+                    $componentXml += "</Component>`n"
+                  }
+                  
+                  # Update the WXS file with dynamic components
+                  $wxsContent = $wxsContent -replace "<ComponentGroup Id=""ProductComponents"" Directory=""INSTALLFOLDER"">(\s+)<!-- Components will be added here dynamically -->", "<ComponentGroup Id=""ProductComponents"" Directory=""INSTALLFOLDER"">`n$componentXml"
+                  Set-Content -Path "installer.wxs" -Value $wxsContent
+                } else {
+                  Write-Error "Build output directory not found: $binDir"
+                  exit 1
+                }
+                
+                # Set GUID for UpgradeCode
+                $upgradeGuid = [Guid]::NewGuid().ToString("B").ToUpper()
+                (Get-Content "installer.wxs") -replace "PUT-GUID-HERE", $upgradeGuid | Set-Content "installer.wxs"
+                
+                # Compile and link the installer
+                Write-Host "Compiling WiX installer..."
+                & candle.exe -arch x64 installer.wxs
+                if ($LASTEXITCODE -ne 0) {
+                  Write-Error "WiX candle compilation failed with exit code $LASTEXITCODE"
+                  exit 1
+                }
+                
+                # Link to create MSI
+                $msiName = "CodeFileSplitter-$version.msi"
+                Write-Host "Linking WiX installer to $msiName..."
+                & light.exe -ext WixUIExtension installer.wixobj -out $msiName
+                if ($LASTEXITCODE -ne 0) {
+                  Write-Error "WiX light linking failed with exit code $LASTEXITCODE"
+                  exit 1
+                }
+                
+                # Verify MSI was created
+                if (Test-Path $msiName) {
+                  Write-Host "MSI installer created successfully: $msiName"
+                } else {
+                  Write-Error "Failed to create MSI installer"
+                  exit 1
+                }
       shell: pwsh
-      
+        
+    - name: Upload MSI artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: MSI Installer
+        path: CodeFileSplitter-*.msi
+        
     - name: Create Release
       uses: softprops/action-gh-release@v1
       with:
         token: ${{ secrets.GITHUB_TOKEN }}
         name: Code File Splitter ${{ github.ref_name }}
-        files: CodeFileSplitter-*.msi
+        files: |
+          CodeFileSplitter-*.msi
+          AppPackages/**/*.msixbundle
+          AppCertificate.cer
         draft: false
         prerelease: false
         generate_release_notes: true
