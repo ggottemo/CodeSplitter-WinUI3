@@ -87,6 +87,7 @@ jobs:
       if: startsWith(github.ref, 'refs/tags/v')
       
     - name: Build solution
+      if: steps.build-cache.outputs.cache-hit != 'true' || startsWith(github.ref, 'refs/tags/v')
       run: |
           msbuild /p:Configuration=${{ env.Configuration }} `
             /p:Platform="${{ env.Platform }}" `
@@ -111,6 +112,26 @@ jobs:
             exit 1
           }
       shell: pwsh
+
+    - name: Cache NuGet packages
+      uses: actions/cache@v3
+      with:
+        path: ~/.nuget/packages
+        key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.csproj') }}
+        restore-keys: |
+          ${{ runner.os }}-nuget-
+
+    - name: Cache build output
+      uses: actions/cache@v3
+      id: build-cache
+      with:
+        path: |
+          AppPackages/
+          **/bin/
+          **/obj/
+        key: ${{ runner.os }}-build-${{ hashFiles('**/*.cs', '**/*.xaml', '**/*.csproj', '**/*.sln') }}-${{ github.run_id }}
+        restore-keys: |
+          ${{ runner.os }}-build-${{ hashFiles('**/*.cs', '**/*.xaml', '**/*.csproj', '**/*.sln') }}-
       
     - name: Create MSI installer with Advanced Installer
       run: |
