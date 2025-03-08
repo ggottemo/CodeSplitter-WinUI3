@@ -7,17 +7,12 @@ on:
 
 jobs:
   build:
-    strategy:
-      matrix:
-        configuration: [Release]
-        platform: [x64]  # You can add x86 if needed
-
     runs-on: windows-latest
     
     env:
       Solution_Name: CodeSplitter.sln
-      Configuration: ${{ matrix.configuration }}
-      Platform: ${{ matrix.platform }}
+      Configuration: Release
+      Platform: x64
       
     steps:
     - name: Checkout code
@@ -131,7 +126,10 @@ jobs:
             /p:AppxBundlePlatforms="${{ env.Platform }}" `
             /p:PackageCertificateKeyFile=GitHubActionsWorkflow.pfx `
             /p:PackageCertificatePassword=$env:CERT_PASSWORD `
-            /p:GenerateAppxPackageOnBuild=true
+            /p:GenerateAppxPackageOnBuild=true `
+            /p:PublishReadyToRun=false `
+            /p:PublishTrimmed=false `
+            /p:SelfContained=true
         } else {
           # If using provided cert without password
           msbuild ${{ env.Solution_Name }} `
@@ -142,7 +140,10 @@ jobs:
             /p:UapAppxPackageBuildMode=StoreAndSideload `
             /p:AppxBundlePlatforms="${{ env.Platform }}" `
             /p:PackageCertificateKeyFile=GitHubActionsWorkflow.pfx `
-            /p:GenerateAppxPackageOnBuild=true
+            /p:GenerateAppxPackageOnBuild=true `
+            /p:PublishReadyToRun=false `
+            /p:PublishTrimmed=false `
+            /p:SelfContained=true
         }
                 
         if ($LASTEXITCODE -ne 0) {
@@ -173,13 +174,13 @@ jobs:
           ${{ runner.os }}-nuget-
 
     - name: Upload MSIX package
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v3
       with:
         name: MSIX Package
         path: AppPackages/
         
     - name: Upload Certificate
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v3
       with:
         name: Certificate
         path: AppCertificate.cer
@@ -201,18 +202,33 @@ jobs:
         if (-not $version -or $version -eq '') { $version = "1.0.0" }
         if ($version.StartsWith('v')) { $version = $version.Substring(1) }
         
+        # Determine the correct build output path
+        # Check for the most likely directory pattern based on your error log
+        $buildDirPattern = "bin\${{ env.Platform }}\${{ env.Configuration }}\net*"
+        $buildDir = Get-ChildItem -Path $buildDirPattern -Directory | Select-Object -First 1 -ExpandProperty FullName
+        
+        if (-not $buildDir) {
+          Write-Error "Could not find build output directory matching pattern: $buildDirPattern"
+          exit 1
+        }
+        
+        Write-Host "Using build output directory: $buildDir"
+        
         # Create folder for installer files
         $installerDir = "InstallerFiles"
         New-Item -ItemType Directory -Path $installerDir -Force
         
         # Get main executable path
-        $exePath = Get-ChildItem -Path "${{ env.Platform }}\${{ env.Configuration }}" -Filter "*.exe" | Select-Object -First 1 -ExpandProperty FullName
+        $exePath = Get-ChildItem -Path $buildDir -Filter "*.exe" | Select-Object -First 1 -ExpandProperty FullName
         if (-not $exePath) {
-          Write-Error "Could not find the main executable"
+          Write-Error "Could not find the main executable in $buildDir"
           exit 1
         }
         $exeName = [System.IO.Path]::GetFileName($exePath)
         Write-Host "Found main executable: $exeName"
+        
+        # Generate a unique GUID for the upgrade code
+        $upgradeGuid = [Guid]::NewGuid().ToString("B").ToUpper()
         
         # Create WiX source file
         $wxsContent = @"
@@ -223,7 +239,7 @@ jobs:
                    Language="1033" 
                    Version="$version" 
                    Manufacturer="Your Company" 
-                   UpgradeCode="PUT-GUID-HERE">
+                   UpgradeCode="$upgradeGuid">
             
             <Package InstallerVersion="200" Compressed="yes" InstallScope="perMachine" />
             
@@ -235,12 +251,8 @@ jobs:
               <ComponentRef Id="ApplicationShortcut" />
             </Feature>
             
-            <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
-            <UIRef Id="WixUI_InstallDir" />
-            <WixVariable Id="WixUILicenseRtf" Value="license.rtf" />
-            
             <Directory Id="TARGETDIR" Name="SourceDir">
-              <Directory Id="ProgramFilesFolder">
+              <Directory Id="ProgramFiles64Folder">
                 <Directory Id="INSTALLFOLDER" Name="CodeFileSplitter">
                   <!-- Components will be added here -->
                 </Directory>
@@ -249,10 +261,6 @@ jobs:
                 <Directory Id="ApplicationProgramsFolder" Name="Code File Splitter"/>
               </Directory>
             </Directory>
-            
-            <ComponentGroup Id="ProductComponents" Directory="INSTALLFOLDER">
-              <!-- Components will be added here dynamically -->
-            </ComponentGroup>
             
             <DirectoryRef Id="ApplicationProgramsFolder">
               <Component Id="ApplicationShortcut" Guid="*">
@@ -265,11 +273,15 @@ jobs:
                 <RegistryValue Root="HKCU" Key="Software\CodeFileSplitter" Name="installed" Type="integer" Value="1" KeyPath="yes"/>
               </Component>
             </DirectoryRef>
+            
+            <ComponentGroup Id="ProductComponents" Directory="INSTALLFOLDER">
+              <!-- Components will be added dynamically -->
+            </ComponentGroup>
           </Product>
         </Wix>
         "@
                 
-                # Create a temporary license file
+                # Create a simple license file
                 $licenseContent = @"
         {\rtf1\ansi\ansicpg1252\deff0\nouicompat\deflang1033{\fonttbl{\f0\fnil\fcharset0 Calibri;}}
         {\*\generator Riched20 10.0.19041}\viewkind4\uc1 
@@ -283,65 +295,144 @@ jobs:
                 Set-Content -Path "installer.wxs" -Value $wxsContent
                 Set-Content -Path "license.rtf" -Value $licenseContent
                 
-                # Gather files for the installer
-                Write-Host "Gathering build output files..."
+                # Gather all the necessary files
+                Write-Host "Finding all required files in $buildDir"
+                $allFiles = Get-ChildItem -Path $buildDir -File -Recurse | Where-Object { -not $_.FullName.Contains("AppX") }
                 
-                # Get binaries from the build output
-                $binDir = "${{ env.Platform }}\${{ env.Configuration }}"
-                if (Test-Path $binDir) {
-                  # Get all files from bin directory
-                  $files = Get-ChildItem -Path $binDir -Recurse -File | Where-Object { -not $_.FullName.Contains("AppX") }
-                  
-                  # Create component entries in WXS file
-                  $componentXml = ""
-                  foreach ($file in $files) {
-                    $fileName = [System.IO.Path]::GetFileName($file.FullName)
-                    $fileId = $fileName.Replace(".", "_").Replace(" ", "_").Replace("-", "_")
-                    $componentXml += "<Component Id='Component_$fileId' Guid='*'>`n"
+                # Generate component entries for all files
+                $componentXml = ""
+                foreach ($file in $allFiles) {
+                    $relativePath = $file.FullName.Substring($buildDir.Length + 1)
+                    $fileId = $file.Name.Replace(".", "_").Replace("-", "_").Replace(" ", "_")
+                    $fileId = $fileId + "_" + (Get-Random -Minimum 1000 -Maximum 9999)
+                    
+                    # Check for subdirectories
+                    $directory = [System.IO.Path]::GetDirectoryName($relativePath)
+                    if ($directory -and $directory -ne "") {
+                        # For files in subdirectories, first create the directory structure
+                        $dirParts = $directory.Split([IO.Path]::DirectorySeparatorChar)
+                        $currentPath = ""
+                        foreach ($part in $dirParts) {
+                            $dirId = "Dir_" + $part.Replace(".", "_").Replace("-", "_").Replace(" ", "_") + "_" + (Get-Random -Minimum 1000 -Maximum 9999)
+                            $parentPath = $currentPath
+                            $currentPath = if ($parentPath) { $parentPath + "\" + $part } else { $part }
+                            
+                            # Check if we've already created this directory
+                            if ($wxsContent -notmatch $dirId) {
+                                $parentDirId = if ($parentPath -eq "") { "INSTALLFOLDER" } else { "Dir_" + $parentPath.Replace("\", "_").Replace(".", "_").Replace("-", "_").Replace(" ", "_") + "_" + (Get-Random -Minimum 1000 -Maximum 9999) }
+                                
+                                # Add directory to WXS
+                                $dirXml = "<Directory Id=`"$dirId`" Name=`"$part`" />"
+                                $wxsContent = $wxsContent -replace "(<Directory Id=`"$parentDirId`"[^>]*>)", "`$1`n      $dirXml"
+                            }
+                        }
+                        
+                        # Use the final directory as parent for the file
+                        $finalDirId = "Dir_" + $directory.Replace("\", "_").Replace(".", "_").Replace("-", "_").Replace(" ", "_") + "_" + (Get-Random -Minimum 1000 -Maximum 9999)
+                        $componentXml += "<Component Id='Component_$fileId' Guid='*' Directory='$finalDirId'>`n"
+                    } else {
+                        # For files in the root directory
+                        $componentXml += "<Component Id='Component_$fileId' Guid='*'>`n"
+                    }
+                    
                     $componentXml += "  <File Id='File_$fileId' Source='$($file.FullName)' KeyPath='yes'/>`n"
                     $componentXml += "</Component>`n"
-                  }
-                  
-                  # Update the WXS file with dynamic components
-                  $wxsContent = $wxsContent -replace "<ComponentGroup Id=""ProductComponents"" Directory=""INSTALLFOLDER"">(\s+)<!-- Components will be added here dynamically -->", "<ComponentGroup Id=""ProductComponents"" Directory=""INSTALLFOLDER"">`n$componentXml"
-                  Set-Content -Path "installer.wxs" -Value $wxsContent
-                } else {
-                  Write-Error "Build output directory not found: $binDir"
-                  exit 1
                 }
                 
-                # Set GUID for UpgradeCode
-                $upgradeGuid = [Guid]::NewGuid().ToString("B").ToUpper()
-                (Get-Content "installer.wxs") -replace "PUT-GUID-HERE", $upgradeGuid | Set-Content "installer.wxs"
+                # Update the WXS file with dynamic components
+                $wxsContent = $wxsContent -replace "<ComponentGroup Id=""ProductComponents"" Directory=""INSTALLFOLDER"">(\s+)<!-- Components will be added dynamically -->", "<ComponentGroup Id=""ProductComponents"" Directory=""INSTALLFOLDER"">`n$componentXml"
+                Set-Content -Path "installer.wxs" -Value $wxsContent
                 
-                # Compile and link the installer
-                Write-Host "Compiling WiX installer..."
-                & candle.exe -arch x64 installer.wxs
-                if ($LASTEXITCODE -ne 0) {
-                  Write-Error "WiX candle compilation failed with exit code $LASTEXITCODE"
-                  exit 1
-                }
-                
-                # Link to create MSI
-                $msiName = "CodeFileSplitter-$version.msi"
-                Write-Host "Linking WiX installer to $msiName..."
-                & light.exe -ext WixUIExtension installer.wixobj -out $msiName
-                if ($LASTEXITCODE -ne 0) {
-                  Write-Error "WiX light linking failed with exit code $LASTEXITCODE"
-                  exit 1
-                }
-                
-                # Verify MSI was created
-                if (Test-Path $msiName) {
-                  Write-Host "MSI installer created successfully: $msiName"
-                } else {
-                  Write-Error "Failed to create MSI installer"
-                  exit 1
-                }
+                # Create a simple UI reference file for the installer
+                $wixUIContent = @"
+        <?xml version="1.0" encoding="UTF-8"?>
+        <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+          <Fragment>
+            <UI Id="WixUI_InstallDir">
+              <TextStyle Id="WixUI_Font_Normal" FaceName="Tahoma" Size="8" />
+              <TextStyle Id="WixUI_Font_Bigger" FaceName="Tahoma" Size="12" />
+              <TextStyle Id="WixUI_Font_Title" FaceName="Tahoma" Size="9" Bold="yes" />
+        
+              <Property Id="DefaultUIFont" Value="WixUI_Font_Normal" />
+              <Property Id="WixUI_Mode" Value="InstallDir" />
+        
+              <DialogRef Id="BrowseDlg" />
+              <DialogRef Id="DiskCostDlg" />
+              <DialogRef Id="ErrorDlg" />
+              <DialogRef Id="FatalError" />
+              <DialogRef Id="FilesInUse" />
+              <DialogRef Id="MsiRMFilesInUse" />
+              <DialogRef Id="PrepareDlg" />
+              <DialogRef Id="ProgressDlg" />
+              <DialogRef Id="ResumeDlg" />
+              <DialogRef Id="UserExit" />
+                    
+              <Publish Dialog="BrowseDlg" Control="OK" Event="DoAction" Value="WixUIValidatePath" Order="3">1</Publish>
+              <Publish Dialog="BrowseDlg" Control="OK" Event="SpawnDialog" Value="InvalidDirDlg" Order="4"><![CDATA[NOT WIXUI_DONTVALIDATEPATH AND WIXUI_INSTALLDIR_VALID<>"1"]]></Publish>
+        
+              <Publish Dialog="ExitDialog" Control="Finish" Event="EndDialog" Value="Return" Order="999">1</Publish>
+        
+              <Publish Dialog="WelcomeDlg" Control="Next" Event="NewDialog" Value="InstallDirDlg">NOT Installed</Publish>
+              <Publish Dialog="WelcomeDlg" Control="Next" Event="NewDialog" Value="VerifyReadyDlg">Installed AND PATCH</Publish>
+        
+              <Publish Dialog="InstallDirDlg" Control="Back" Event="NewDialog" Value="WelcomeDlg">1</Publish>
+              <Publish Dialog="InstallDirDlg" Control="Next" Event="SetTargetPath" Value="[WIXUI_INSTALLDIR]" Order="1">1</Publish>
+              <Publish Dialog="InstallDirDlg" Control="Next" Event="DoAction" Value="WixUIValidatePath" Order="2">NOT WIXUI_DONTVALIDATEPATH</Publish>
+              <Publish Dialog="InstallDirDlg" Control="Next" Event="SpawnDialog" Value="InvalidDirDlg" Order="3"><![CDATA[NOT WIXUI_DONTVALIDATEPATH AND WIXUI_INSTALLDIR_VALID<>"1"]]></Publish>
+              <Publish Dialog="InstallDirDlg" Control="Next" Event="NewDialog" Value="VerifyReadyDlg" Order="4">WIXUI_DONTVALIDATEPATH OR WIXUI_INSTALLDIR_VALID="1"</Publish>
+              <Publish Dialog="InstallDirDlg" Control="ChangeFolder" Property="_BrowseProperty" Value="[WIXUI_INSTALLDIR]" Order="1">1</Publish>
+              <Publish Dialog="InstallDirDlg" Control="ChangeFolder" Event="SpawnDialog" Value="BrowseDlg" Order="2">1</Publish>
+                    
+              <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="InstallDirDlg" Order="1">NOT Installed</Publish>
+              <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="MaintenanceTypeDlg" Order="2">Installed AND NOT PATCH</Publish>
+              <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="WelcomeDlg" Order="2">Installed AND PATCH</Publish>
+        
+              <Publish Dialog="MaintenanceWelcomeDlg" Control="Next" Event="NewDialog" Value="MaintenanceTypeDlg">1</Publish>
+        
+              <Publish Dialog="MaintenanceTypeDlg" Control="RepairButton" Event="NewDialog" Value="VerifyReadyDlg">1</Publish>
+              <Publish Dialog="MaintenanceTypeDlg" Control="RemoveButton" Event="NewDialog" Value="VerifyReadyDlg">1</Publish>
+              <Publish Dialog="MaintenanceTypeDlg" Control="Back" Event="NewDialog" Value="MaintenanceWelcomeDlg">1</Publish>
+        
+              <Property Id="ARPNOMODIFY" Value="1" />
+            </UI>
+        
+            <UIRef Id="WixUI_Common" />
+          </Fragment>
+        </Wix>
+        "@
+        Set-Content -Path "WixUI_InstallDir.wxs" -Value $wixUIContent
+        
+        # Compile and link the installer
+        Write-Host "Compiling WiX source files..."
+        & candle.exe -arch x64 -ext WixUIExtension installer.wxs
+        & candle.exe -arch x64 -ext WixUIExtension WixUI_InstallDir.wxs
+        
+        if ($LASTEXITCODE -ne 0) {
+          Write-Error "WiX candle compilation failed with exit code $LASTEXITCODE"
+          exit 1
+        }
+        
+        # Link to create MSI
+        $msiName = "CodeFileSplitter-$version.msi"
+        Write-Host "Linking WiX installer to $msiName..."
+        & light.exe -ext WixUIExtension -cultures:en-us installer.wixobj WixUI_InstallDir.wixobj -out $msiName
+        
+        if ($LASTEXITCODE -ne 0) {
+          Write-Error "WiX light linking failed with exit code $LASTEXITCODE"
+          exit 1
+        }
+        
+        # Verify MSI was created
+        if (Test-Path $msiName) {
+          Write-Host "MSI installer created successfully: $msiName"
+        } else {
+          Write-Error "Failed to create MSI installer"
+          exit 1
+        }
       shell: pwsh
         
     - name: Upload MSI artifact
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v3
       with:
         name: MSI Installer
         path: CodeFileSplitter-*.msi
