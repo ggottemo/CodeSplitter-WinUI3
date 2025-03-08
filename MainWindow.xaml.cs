@@ -7,6 +7,8 @@ using System.IO;
 using System.Text.RegularExpressions;
 using Windows.Storage;
 using Windows.Storage.Pickers;
+using CodeFileSplitter.Models;
+using CodeFileSplitter.Services;
 
 namespace CodeFileSplitter
 {
@@ -16,6 +18,7 @@ namespace CodeFileSplitter
     public sealed partial class MainWindow : Window
     {
         private ObservableCollection<ParsedFile> ParsedFiles { get; } = new();
+        private readonly CodeParser _codeParser = new();
 
         public MainWindow()
         {
@@ -54,7 +57,20 @@ namespace CodeFileSplitter
 
             try
             {
-                var files = ParseCodeIntoFiles(codeContent);
+                var files = _codeParser.ParseCodeIntoFiles(codeContent);
+                if (files.Count == 0)
+                {
+                    ContentDialog dialog = new()
+                    {
+                        Title = "No Files Found",
+                        Content = "No file headers found. Please ensure your code contains headers in the format '// filename.ext'",
+                        CloseButtonText = "OK",
+                        XamlRoot = Content.XamlRoot
+                    };
+                    await dialog.ShowAsync();
+                    return;
+                }
+
                 foreach (var file in files)
                 {
                     ParsedFiles.Add(file);
@@ -74,42 +90,6 @@ namespace CodeFileSplitter
 
                 await dialog.ShowAsync();
             }
-        }
-
-        private List<ParsedFile> ParseCodeIntoFiles(string code)
-        {
-            var files = new List<ParsedFile>();
-
-            // Simple regex to match file headers like "// filename.ext"
-            var regex = new Regex(@"//\s+([^\s]+\.[^\s]+)");
-            var matches = regex.Matches(code);
-
-            if (matches.Count == 0)
-            {
-                _ = new ContentDialog
-                {
-                    Title = "No Files Found",
-                    Content = "No file headers found. Please ensure your code contains headers in the format '// filename.ext'",
-                    CloseButtonText = "OK",
-                    XamlRoot = Content.XamlRoot
-                }.ShowAsync();
-
-                return files;
-            }
-
-            for (int i = 0; i < matches.Count; i++)
-            {
-                var match = matches[i];
-                string filename = match.Groups[1].Value;
-
-                int startPos = match.Index;
-                int endPos = (i < matches.Count - 1) ? matches[i + 1].Index : code.Length;
-
-                string fileContent = code[startPos..endPos].Trim();
-                files.Add(new ParsedFile { Filename = filename, Content = fileContent });
-            }
-
-            return files;
         }
 
         private async void DownloadAllButton_Click(object sender, RoutedEventArgs e)
@@ -149,8 +129,8 @@ namespace CodeFileSplitter
                         if (filename.Contains('/') || filename.Contains('\\'))
                         {
                             // Extract the directory path and filename
-                            string dirPath = Path.GetDirectoryName(filename.Replace('/', '\\'));
-                            string baseFilename = Path.GetFileName(filename.Replace('/', '\\'));
+                            string dirPath = PathUtils.GetDirectoryPath(filename);
+                            string baseFilename = PathUtils.GetFileName(filename);
 
                             // Create directory structure if needed
                             StorageFolder targetFolder = folder;
@@ -266,12 +246,6 @@ namespace CodeFileSplitter
                 await fileViewDialog.ShowAsync();
             }
         }
-    }
-
-    public class ParsedFile
-    {
-        public string Filename { get; set; } = "";
-        public string Content { get; set; } = "";
     }
 
     // Helper class to initialize file pickers in WinUI 3 desktop apps
